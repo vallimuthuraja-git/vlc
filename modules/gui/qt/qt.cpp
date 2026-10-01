@@ -30,7 +30,10 @@
 
 #include <QApplication>
 #include <QDate>
+#include <QGuiApplication>
 #include <QMutex>
+#include <QStyle>
+#include <QStyleHints> /* QStyleHints::colorScheme() */
 
 #include "qt.hpp"
 
@@ -122,8 +125,12 @@ static void ShowDialog   ( intf_thread_t *, int, int, intf_dialog_args_t * );
 
 #define ERROR_TEXT N_( "Show unimportant error and warnings dialogs" )
 
-#define QT_DARK_TEXT N_( "Enable Dark Mode" )
-#define QT_DARK_LONGTEXT N_( "Applies a dark theme to the style." )
+#define QT_DARK_TEXT N_( "Force the Qt interface to use the dark palette, or follow the system" )
+#define QT_DARK_LONGTEXT N_( "Choose the colour theme of the Qt interface.\n" \
+                       "\"System\" follows the desktop preference (light or dark) and " \
+                       "updates when the system setting changes.\n" \
+                       "\"Dark\" always uses the dark palette.\n" \
+                       "\"Light\" always uses the classic palette." )
 
 #define UPDATER_TEXT N_( "Activate the updates availability notification" )
 #define UPDATER_LONGTEXT N_( "Activate the automatic notification of new " \
@@ -209,6 +216,17 @@ static const int i_continue_list[] =
 static const char *const psz_continue_list_text[] =
     { N_("Never"), N_("Ask"), N_("Always") };
 
+/* Colour theme selection. 0 = follow the desktop, 1 = force dark, 2 = force light.
+ * This replaces the old boolean "qt-dark-palette" while keeping the same
+ * variable name so existing user configurations keep working: 0/1 map onto
+ * the old false/true meaning, and the 0 entry now means "system" rather than
+ * "light". */
+static const int i_color_scheme_list[] =
+    { 0, 1, 2 };
+
+static const char *const psz_color_scheme_list_text[] =
+    { N_("System"), N_("Dark"), N_("Light") };
+
 static const int i_raise_list[] =
     { MainInterface::RAISE_NEVER, MainInterface::RAISE_VIDEO, \
       MainInterface::RAISE_AUDIO, MainInterface::RAISE_AUDIOVIDEO,  };
@@ -260,8 +278,9 @@ vlc_module_begin ()
                 RECENTPLAY_FILTER_TEXT, RECENTPLAY_FILTER_LONGTEXT, false )
     add_integer( "qt-continue", 1, CONTINUE_PLAYBACK_TEXT, CONTINUE_PLAYBACK_TEXT, false )
             change_integer_list(i_continue_list, psz_continue_list_text )
-    add_bool( "qt-dark-palette", false, QT_DARK_TEXT,
-                  QT_DARK_LONGTEXT, false )
+    add_integer( "qt-dark-palette", 0, QT_DARK_TEXT,
+                   QT_DARK_LONGTEXT, false )
+            change_integer_list( i_color_scheme_list, psz_color_scheme_list_text )
 
 #ifdef UPDATE_CHECK
     add_bool( "qt-updates-notif", true, UPDATER_TEXT,
@@ -389,62 +408,226 @@ static bool HasX11( vlc_object_t *obj )
 }
 #endif
 
-bool isDarkPaletteEnabled(intf_thread_t *p_intf) {
-    static const bool darkPalette = var_InheritBool( p_intf, "qt-dark-palette" );
-    return darkPalette;
-}
+/* Palette that was in use before the dark palette was applied. It is captured
+ * once so that turning the dark palette off restores the exact classic colours
+ * instead of guessing from the current style, which may itself be dark on a
+ * dark desktop theme. */
+static QPalette classicPalette;
+static bool classicPaletteSaved = false;
 
-void applyDarkPalette() {
-    QPalette darkPalette;
-    static const QColor darkColor  (33, 33, 33);
-    static const QColor gray       (75,75,75);
-    static const QColor lightGray  (138, 138, 138);
-    static const QColor baseColor  (18, 18, 18);
-    static const QColor linkColor  (255, 168, 81);
+/* Returns true when the desktop is currently asking applications to use a dark
+ * appearance. Covers the three ways that can be known:
+ *   - Qt 6.5+ exposes it directly through QStyleHints::colorScheme().
+ *   - On Windows the registry holds AppsUseLightTheme.
+ *   - Everywhere else the platform default palette's window colour is the only
+ *     signal available, so it is compared against mid grey.
+ * Returns false when the desktop gives us no usable answer. */
+static bool systemPrefersDark()
+{
+    /* Qt 6.5+ exposes the desktop scheme directly; older Qt still compiles but
+     * the deprecated Unknown value simply falls through to the heuristics. */
+    const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
+    if (scheme == Qt::ColorScheme::Dark)
+        return true;
+    if (scheme == Qt::ColorScheme::Light)
+        return false;
 
 #ifdef Q_OS_WIN
-    QColor accentColor = getWindowsAccentColor();
+    /* Missing key (or an unreadable one) means "not specified", and the
+     * documented default for AppsUseLightTheme is light. */
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+    DWORD value = 1, size = sizeof(value), type = 0;
+    const LSTATUS ret = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr, &type,
+                                         reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(key);
+    if (ret != ERROR_SUCCESS || type != REG_DWORD)
+        return false;
+    return value == 0; /* 0 == apps should use the dark theme */
 #else
-    QColor accentColor (42, 130, 218);
+    /* The platform palette is the only cross-desktop signal. Compare the
+     * window colour's lightness rather than any single channel, so a tinted
+     * dark theme is still recognised as dark. */
+    const QPalette platformPalette = QApplication::style()->standardPalette();
+    return platformPalette.color(QPalette::Active, QPalette::Window).lightness() < 128;
+#endif
+}
+
+/* Last value read from the config: 0 = System, 1 = Dark, 2 = Light. Refreshed
+ * by isDarkPaletteEnabled() whenever a live object is available; kept here so
+ * the system-theme watcher can consult it without needing one. */
+static int64_t s_configuredScheme = 0;
+
+/* The theme the user asked for, independent of what is currently applied. */
+enum class ColorScheme { System, Dark, Light };
+
+static ColorScheme configuredColorScheme()
+{
+    switch (s_configuredScheme)
+    {
+        case 1:  return ColorScheme::Dark;
+        case 2:  return ColorScheme::Light;
+        default: return ColorScheme::System;
+    }
+}
+
+/* True when the effective theme, after resolving "System", is dark. */
+bool isDarkPaletteEnabled(intf_thread_t *p_intf)
+{
+    /* Read live rather than from a cached static bool: the preference can
+     * change at runtime from the Interface preferences panel, and the widgets
+     * re-theme themselves when it does. */
+    if (p_intf != NULL)
+        s_configuredScheme = var_InheritInteger(p_intf, "qt-dark-palette");
+
+    const ColorScheme scheme = configuredColorScheme();
+    if (scheme == ColorScheme::System)
+        return systemPrefersDark();
+    return scheme == ColorScheme::Dark;
+}
+
+void applyDarkPalette()
+{
+    /* Remember the classic palette before we replace it, so the user can go
+     * back to it later. Only the first call captures it, otherwise a second
+     * "enable" would store the dark palette as the classic one. */
+    if (!classicPaletteSaved)
+    {
+        classicPalette = QApplication::palette();
+        classicPaletteSaved = true;
+    }
+
+    QPalette darkPalette;
+
+    /* Base greys, kept deliberately close together so that the window, the
+     * input fields and the raised surfaces stay distinguishable without the
+     * interface turning into a set of unrelated black boxes. */
+    static const QColor windowColor (43, 43, 43);    /* #2B2B2B panels        */
+    static const QColor baseColor   (24, 24, 24);    /* #181818 text fields  */
+    static const QColor altColor    (35, 35, 35);    /* #232323 zebra rows   */
+    static const QColor midColor    (62, 62, 62);    /* #3E3E3E separators   */
+    static const QColor lightColor  (95, 95, 95);    /* #5F5F5F 3D borders   */
+    static const QColor darkColor   (15, 15, 15);    /* #0F0F0F shadows      */
+    static const QColor textColor   (255, 255, 255);
+    static const QColor dimText     (150, 150, 150); /* unfocused / secondary */
+    /* Disabled text. Must stay >= 3:1 against the darkest background it can
+     * sit on (Base, #181818), otherwise disabled labels become unreadable
+     * rather than merely recessive. */
+    static const QColor disabledText(120, 120, 120);
+    static const QColor disabledBg  (20, 20, 20);
+
+    /* VLC brand orange: readable on the dark backgrounds and consistent with
+     * the artwork used across the interface. On Windows the user accent
+     * colour is honoured instead. */
+#ifdef Q_OS_WIN
+    QColor accentColor = getWindowsAccentColor();
+    if (!accentColor.isValid())
+        accentColor = QColor(255, 136, 0);
+#else
+    QColor accentColor (255, 136, 0);
+#endif
+    /* Links must not use the accent directly: white-on-orange is weak text,
+     * so a lighter tint of the accent is used for text and the pure accent is
+     * kept for selection fills. */
+    const QColor linkColor = accentColor.lighter(140);
+    const QColor linkVisited = accentColor.lighter(105);
+    const QColor highlightText = QColor(20, 20, 20); /* dark text on orange */
+
+    const auto setAll = [&darkPalette](QPalette::ColorRole role,
+                                       const QColor &active,
+                                       const QColor &inactive,
+                                       const QColor &disabled)
+    {
+        darkPalette.setColor(QPalette::Active,   role, active);
+        darkPalette.setColor(QPalette::Inactive, role, inactive);
+        darkPalette.setColor(QPalette::Disabled, role, disabled);
+    };
+
+    setAll(QPalette::Window,          windowColor, windowColor, windowColor);
+    setAll(QPalette::WindowText,      textColor,   dimText,     disabledText);
+    setAll(QPalette::Base,            baseColor,   baseColor,   disabledBg);
+    setAll(QPalette::AlternateBase,   altColor,    altColor,    altColor);
+    setAll(QPalette::Button,          windowColor, windowColor, disabledBg);
+    setAll(QPalette::ButtonText,      textColor,   dimText,     disabledText);
+    setAll(QPalette::Text,            textColor,   dimText,     disabledText);
+    setAll(QPalette::Highlight,       accentColor, accentColor, QColor(70, 70, 70));
+    setAll(QPalette::HighlightedText, highlightText, dimText,    disabledText);
+    setAll(QPalette::Link,            linkColor,   linkColor,   disabledText);
+    setAll(QPalette::LinkVisited,     linkVisited, linkVisited, disabledText);
+    setAll(QPalette::PlaceholderText, dimText,     dimText,     disabledText);
+
+    /* Tooltips are shown on a lighter surface than the window so they read as
+     * floating rather than as holes cut into the interface. */
+    static const QColor tooltipColor (58, 58, 58);
+    setAll(QPalette::ToolTipBase, tooltipColor, tooltipColor, tooltipColor);
+    setAll(QPalette::ToolTipText, textColor,   textColor,   disabledText);
+
+    /* Non-text roles are used by the styles for borders, 3D edges and
+     * separators; leaving them at their light defaults is what makes a dark
+     * palette look like light widgets with a dark background. */
+    setAll(QPalette::Light,      lightColor,  lightColor,  darkColor);
+    setAll(QPalette::Midlight,   midColor,    midColor,    darkColor);
+    setAll(QPalette::Mid,        midColor,    midColor,    darkColor);
+    setAll(QPalette::Dark,       darkColor,   darkColor,   darkColor);
+    setAll(QPalette::Shadow,     darkColor,   darkColor,   darkColor);
+    setAll(QPalette::BrightText, QColor(255, 120, 0), QColor(255, 120, 0), disabledText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    setAll(QPalette::Accent, accentColor, accentColor, QColor(70, 70, 70));
 #endif
 
-    // Active group (the currently focused window)
-    darkPalette.setColor(QPalette::Active, QPalette::Window,          darkColor);
-    darkPalette.setColor(QPalette::Active, QPalette::WindowText,      Qt::white);
-    darkPalette.setColor(QPalette::Active, QPalette::Base,            baseColor);
-    darkPalette.setColor(QPalette::Active, QPalette::AlternateBase,   darkColor);
-    darkPalette.setColor(QPalette::Active, QPalette::Button,          darkColor);
-    darkPalette.setColor(QPalette::Active, QPalette::ButtonText,      Qt::white);
-    darkPalette.setColor(QPalette::Active, QPalette::Text,            Qt::white);
-    darkPalette.setColor(QPalette::Active, QPalette::Highlight,       accentColor);
-    darkPalette.setColor(QPalette::Active, QPalette::HighlightedText, Qt::white);
-    darkPalette.setColor(QPalette::Active, QPalette::Link,            linkColor);
-
-    // Inactive group (unfocused window)
-    darkPalette.setColor(QPalette::Inactive, QPalette::Window,          darkColor);
-    darkPalette.setColor(QPalette::Inactive, QPalette::WindowText,      lightGray);
-    darkPalette.setColor(QPalette::Inactive, QPalette::Base,            baseColor);
-    darkPalette.setColor(QPalette::Inactive, QPalette::AlternateBase,   darkColor);
-    darkPalette.setColor(QPalette::Inactive, QPalette::Button,          darkColor);
-    darkPalette.setColor(QPalette::Inactive, QPalette::ButtonText,      lightGray);
-    darkPalette.setColor(QPalette::Inactive, QPalette::Text,            lightGray);
-    darkPalette.setColor(QPalette::Inactive, QPalette::Highlight,       accentColor);
-    darkPalette.setColor(QPalette::Inactive, QPalette::HighlightedText, lightGray);
-
-    // Disabled group (grayed-out widgets)
-    darkPalette.setColor(QPalette::Disabled, QPalette::Window,          darkColor);
-    darkPalette.setColor(QPalette::Disabled, QPalette::WindowText,      lightGray);
-    darkPalette.setColor(QPalette::Disabled, QPalette::Base,            baseColor);
-    darkPalette.setColor(QPalette::Disabled, QPalette::AlternateBase,   darkColor);
-    darkPalette.setColor(QPalette::Disabled, QPalette::Button,          baseColor);
-    darkPalette.setColor(QPalette::Disabled, QPalette::ButtonText,      gray);
-    darkPalette.setColor(QPalette::Disabled, QPalette::Text,            gray);
-    darkPalette.setColor(QPalette::Disabled, QPalette::Highlight,       gray);
-    darkPalette.setColor(QPalette::Disabled, QPalette::HighlightedText, gray);
-    darkPalette.setColor(QPalette::Disabled, QPalette::Light,           darkColor);
-
-    // Apply the dark palette globally
+    /* Apply the dark palette globally */
     QApplication::setPalette(darkPalette);
+}
+
+bool hasClassicPalette()
+{
+    return classicPaletteSaved;
+}
+
+void applyClassicPalette()
+{
+    if (classicPaletteSaved)
+        QApplication::setPalette(classicPalette);
+    else
+        QApplication::setPalette(QApplication::style()->standardPalette());
+}
+
+/* Applies whichever theme the current configuration resolves to, and records
+ * it so applyCurrentColorScheme() can be called again (after a preference
+ * change, or a system theme change) without the wrong branch winning. */
+static bool bDarkPaletteApplied = false;
+
+/* Store the user's choice. Callers that already have the new value (the
+ * preferences panel right after writing it) use this instead of going back
+ * through the config machinery. */
+void setColorSchemePreference( int64_t value )
+{
+    s_configuredScheme = value;
+}
+
+void applyCurrentColorScheme(intf_thread_t *p_intf)
+{
+    const bool dark = isDarkPaletteEnabled( p_intf );
+    if (dark)
+        applyDarkPalette();
+    else
+        applyClassicPalette();
+    bDarkPaletteApplied = dark;
+}
+
+/* Called when the desktop tells us its appearance changed. Only meaningful for
+ * the "System" setting: an explicit Dark or Light choice must not be
+ * overridden by the desktop. */
+void onSystemColorSchemeChanged()
+{
+    if (configuredColorScheme() != ColorScheme::System)
+        return;
+    if (isDarkPaletteEnabled( NULL ) == bDarkPaletteApplied)
+        return; /* Nothing actually changed; avoid a pointless repaint. */
+    applyCurrentColorScheme( NULL );
 }
 
 /* Open Interface */
@@ -576,6 +759,14 @@ static void *ThreadPlatform( void *obj, char *platform_name )
      * necessary for  RTL locales */
     app.setLayoutDirection(QLocale().textDirection());
 
+    /* The colour theme is applied further down, once the widget style is known:
+     * QApplication::setStyle() resets the application palette, so applying it
+     * here would be undone. The system-theme watcher is connected here because
+     * it only needs the application object. */
+    /* Follow the desktop for as long as the user chose "System". */
+    QObject::connect( app.styleHints(), &QStyleHints::colorSchemeChanged,
+                      &app, []() { onSystemColorSchemeChanged(); } );
+
     p_sys->p_app = &app;
 
 
@@ -681,9 +872,15 @@ static void *ThreadPlatform( void *obj, char *platform_name )
     if (!s_style.isEmpty())
         QApplication::setStyle( s_style );
 
-    // Apply dark palette only if dark palette is enabled
-    if (isDarkPaletteEnabled(p_intf))
-        applyDarkPalette();
+    /* Apply the colour theme. This must come after the style is set, because
+     * QApplication::setStyle() resets the application palette to the style's
+     * defaults - applying the palette first would silently discard it.
+     * The native platform styles ignore palette colours, so when the user has
+     * not chosen a style explicitly, fall back to Fusion for the dark theme to
+     * actually be honoured. */
+    if (isDarkPaletteEnabled(p_intf) && s_style.isEmpty())
+        QApplication::setStyle( QStringLiteral( "Fusion" ) );
+    applyCurrentColorScheme(p_intf);
 
     /* Launch */
     app.exec();

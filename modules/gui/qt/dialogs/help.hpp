@@ -66,6 +66,10 @@ protected:
 
 private:
     bool b_advanced;
+    bool b_blurbsInitialised = false;
+    QString blurbText;
+
+    void applyTheme();
 
 private slots:
     void showLicense();

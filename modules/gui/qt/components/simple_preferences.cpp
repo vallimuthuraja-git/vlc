@@ -783,9 +783,6 @@ SPrefsPanel::SPrefsPanel( intf_thread_t *_p_intf, QWidget *_parent,
                 ui.qt->setChecked( true );
             }
 
-            if ( var_InheritBool( p_intf, "qt-dark-palette" ) )
-                ui.qtdark->setChecked( true ); /*dark palette*/
-
             free( psz_intf );
 
             optionWidgets["skinRB"] = ui.skins;
@@ -816,19 +813,32 @@ SPrefsPanel::SPrefsPanel( intf_thread_t *_p_intf, QWidget *_parent,
 #endif
             ui.styleStackedWidget->setCurrentIndex( radioGroup->checkedId() );
 
-			CONFIG_BOOL( "qt-dark-palette", qtdark );
-			// Connecting the stateChanged signal of the checkbox
-			connect(ui.qtdark, &QCheckBox::stateChanged, ui.stylesCombo, [combobox = ui.stylesCombo](const int state) {
-				if (state == Qt::CheckState::Checked) {
-					// Set the current style to "Fusion"
-					combobox->setCurrentText(QStringLiteral("Fusion"));
-					// Apply the dark palette
-					applyDarkPalette();
-				} else {
-					// Remove the custom palette and revert to the default
-					QApplication::setPalette(QApplication::style()->standardPalette());
-				}
-			});
+			/* Colour theme: "System" follows the desktop, "Dark" and "Light"
+			 * force a theme. The native platform styles ignore palette
+			 * colours, so Fusion is selected whenever a custom palette is in
+			 * use - otherwise the palette would be applied and have no
+			 * visible effect. */
+			ui.qtdark->addItem( qtr("System"), 0 );
+			ui.qtdark->addItem( qtr("Dark"),   1 );
+			ui.qtdark->addItem( qtr("Light"),  2 );
+			/* Loaded by hand rather than through a ConfigControl: the control
+			 * machinery only knows checkboxes and value widgets, not an
+			 * enumerated combo box. */
+			{
+				const int64_t stored = config_GetInt( p_intf, "qt-dark-palette" );
+				ui.qtdark->setCurrentIndex( ( stored >= 0 && stored <= 2 )
+				                                ? int( stored ) : 0 );
+			}
+
+			connect( ui.qtdark, QOverload<int>::of(&QComboBox::currentIndexChanged),
+			         this, [this, combobox = ui.stylesCombo](const int index)
+			{
+				if( index < 0 )
+					return;
+				if( !applyColorSchemeFromUi( index ) )
+					/* Fusion honours palette colours, unlike the native styles. */
+					combobox->setCurrentText( QStringLiteral("Fusion") );
+			} );
 
             connect( ui.minimalviewBox, &QCheckBox::toggled,
                      ui.mainPreview, &InterfacePreviewWidget::setNormalPreview );
@@ -1082,6 +1092,20 @@ void SPrefsPanel::updateAudioVolume( int volume )
 }
 
 
+/* Writes the newly selected colour scheme to the config and applies it right
+ * away, so the interface re-themes without needing the dialog to be closed.
+ * Returns true when a custom palette is in use, which means the widget style
+ * has to be Fusion for those colours to be visible at all. */
+bool SPrefsPanel::applyColorSchemeFromUi( int index )
+{
+    config_PutInt( p_intf, "qt-dark-palette", index );
+    /* No need to re-read what we just wrote: push it into the cache and apply
+     * straight away so the interface re-themes without the dialog closing. */
+    setColorSchemePreference( index );
+    applyCurrentColorScheme( NULL );
+    return isDarkPaletteEnabled( p_intf );
+}
+
 /* Function called from the main Preferences dialog on each SPrefs Panel */
 void SPrefsPanel::apply()
 {
@@ -1236,6 +1260,11 @@ void SPrefsPanel::lastfm_Changed( int i_state )
 void SPrefsPanel::changeStyle( QString s_style )
 {
     QApplication::setStyle( s_style );
+
+    /* setStyle() resets the application palette to the new style's defaults,
+     * which silently discards the colour theme. Re-apply it so changing the
+     * style never leaves the interface unpainted. */
+    applyCurrentColorScheme( p_intf );
 
     /* force refresh on all widgets */
     QWidgetList widgets = QApplication::allWidgets();

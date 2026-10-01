@@ -66,8 +66,9 @@ void EPGGraphicsScene::drawBackground( QPainter *painter, const QRectF &rect)
         area.setLeft( area.right() + 1 );
     }
 
-    /* channels lines */
-    painter->setPen( QPen( QColor( 224, 224, 224 ) ) );
+    /* channels lines -- derived from the palette so they stay visible on the
+     * dark theme as well as the classic one */
+    painter->setPen( QPen( palette().color( QPalette::Mid ) ) );
     for( int y = rect.top() + TRACKS_HEIGHT ; y < rect.bottom() ; y += TRACKS_HEIGHT )
        painter->drawLine( QLineF( rect.left(), y, rect.right(), y ) );
 

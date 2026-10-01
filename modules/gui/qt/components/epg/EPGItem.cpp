@@ -30,6 +30,7 @@
 #include <QGraphicsSceneHoverEvent>
 #include <QStyle>
 #include <QTimeZone>
+#include <QPalette>
 
 #include "EPGItem.hpp"
 #include "EPGView.hpp"
@@ -71,15 +72,29 @@ void EPGItem::paint( QPainter *painter, const QStyleOptionGraphicsItem *option, 
     QLinearGradient gradient( mapped.topLeft(), mapped.bottomLeft() );
 
     if ( program->getCurrent() == this )
-        gradientColor.setRgb( 244, 125, 0 , 255 );
+        gradientColor.setRgb( 244, 125, 0 , 255 );     /* VLC orange, both themes */
     else
-        gradientColor.setRgb( 201, 217, 242 );
+    {
+        /* Non-current programmes: keep the soft blue on the classic theme, but
+         * on a dark background use a dark slate so the text stays readable.
+         * Decided from the widget palette so it follows the active theme
+         * without having to reach for the interface. */
+        const QColor base = m_view->palette().color( QPalette::Base );
+        if ( base.lightness() < 128 )
+            gradientColor = QColor( 62, 74, 92 );
+        else
+            gradientColor.setRgb( 201, 217, 242 );
+    }
 
     gradient.setColorAt( 0.0, gradientColor.lighter( 120 ) );
     gradient.setColorAt( 1.0, gradientColor );
 
+    /* The border must contrast with the gradient above: on the dark theme a black
+     * outline would disappear, so brighten it there. */
+    const bool darkTheme = m_view->palette().color( QPalette::Base ).lightness() < 128;
     pen.setColor( option->state & QStyle::State_MouseOver || hasFocus()
-                  ? QColor( 0, 0, 0 ) : QColor( 192, 192, 192 ) );
+                  ? ( darkTheme ? QColor( 235, 235, 235 ) : QColor( 0, 0, 0 ) )
+                  : ( darkTheme ? QColor( 130, 130, 130 ) : QColor( 192, 192, 192 ) ) );
 
     pen.setStyle( option->state & QStyle::State_MouseOver && !hasFocus()
                   ? Qt::DashLine : Qt::SolidLine );

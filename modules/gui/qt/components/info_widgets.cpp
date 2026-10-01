@@ -27,6 +27,7 @@
 #include <QPolygonF>
 #include <QGraphicsPolygonItem>
 #include <QGraphicsLineItem>
+#include <QPalette>
 
 #define STATS_LENGTH 60
 #define ADD_LABEL(row, color, text) \
@@ -38,8 +39,13 @@ layout->addWidget( label, row, 0, 1, 1, 0 );
 
 VLCStatsView::VLCStatsView( QWidget *parent ) : QGraphicsView( parent )
 {
-    QColor history(0, 0, 0, 255),
-        total(237, 109, 0, 160),
+    /* The graph is drawn on the surrounding widget background, so the "history"
+     * fill and the ruler lines have to contrast with the current theme. On a
+     * dark background a black fill would be invisible, so invert it there. */
+    const bool darkTheme = palette().color( QPalette::Base ).lightness() < 128;
+    const QColor history = darkTheme ? QColor( 235, 235, 235, 255 )
+                                     : QColor( 0, 0, 0, 255 );
+    QColor total(237, 109, 0, 160),
         content(109, 237, 0, 160);
 
     scale( 1.0, -1.0 ); /* invert our Y axis */
@@ -57,7 +63,8 @@ VLCStatsView::VLCStatsView( QWidget *parent ) : QGraphicsView( parent )
 
     QPen linepen( Qt::DotLine );
     linepen.setCosmetic( true );
-    linepen.setBrush( QBrush( QColor( 33, 33, 33 ) ) );
+    linepen.setBrush( QBrush( darkTheme ? QColor( 110, 110, 110 )
+                                        : QColor( 33, 33, 33 ) ) );
     for ( int i=0; i<3; i++ )
         rulers[i] = viewScene->addLine( QLineF(), linepen );
 }

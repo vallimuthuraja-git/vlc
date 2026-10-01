@@ -85,22 +85,32 @@ AboutDialog::AboutDialog( intf_thread_t *_p_intf)
     setWindowRole( "vlc-about" );
     setWindowModality( Qt::WindowModal );
 
+    /* Rich text does not pick up palette colours on its own, so the hardcoded
+     * light link colour has to be dropped in dark mode. This dialog is a
+     * singleton, so it is built against whatever theme was active at startup;
+     * applyTheme() re-derives everything on each show. */
+    const bool darkPalette = isDarkPaletteEnabled( p_intf );
     QString linkColor;
-    if ( var_InheritBool( p_intf, "qt-dark-palette" ) ) {
-        ui.horizontalFrame->setStyleSheet("background-color: rgb(10, 10, 10);");
-        ui.footer->setStyleSheet("background-color: rgb(25, 25, 25);");
-        linkColor = "#ffa851";
+    if ( darkPalette ) {
+        const QPalette pal = QApplication::palette();
+        linkColor = pal.color( QPalette::Active, QPalette::Link ).name();
     } else {
-        ui.horizontalFrame->setStyleSheet("background-color: rgb(230, 230, 230);");
-        ui.footer->setStyleSheet("background-color: rgb(245, 245, 245);");
         linkColor = "#0057ae";
     }
+
+    /* about.ui installs a stylesheet on the root widget that hardcodes a white
+     * background and light-grey scrollbar. A widget-level stylesheet outranks
+     * the application palette for that widget and its whole child tree, so it
+     * has to be replaced, not merely supplemented. applyTheme() regenerates it
+     * from the current palette. */
+    applyTheme();
 
     ui.version->setText(qfu( " " VERSION_MESSAGE ) );
     ui.title->setText("<html><head/><body><p><span style=\" font-size:26pt;\"> " + qtr( "VLC media player" ) + " </span></p></body></html>");
     QString translatedString = qtr( "<p>VLC media player is a free and open source media player, encoder, and streamer made by the volunteers of the <a href=\"http://www.videolan.org/\"><span style=\" text-decoration: underline; color:#0057ae;\">VideoLAN</span></a> community.</p><p>VLC uses its internal codecs, works on essentially every popular platform, and can read almost all files, CDs, DVDs, network streams, capture cards and other media formats!</p><p><a href=\"http://www.videolan.org/contribute/\"><span style=\" text-decoration: underline; color:#0057ae;\">Help and join us!</span></a>" );
-    if ( var_InheritBool( p_intf, "qt-dark-palette" ) )
+    if ( darkPalette )
         translatedString.remove(QLatin1String("#0057ae"));
+    blurbText = translatedString;
     ui.MainBlabla->setText("<html><head/><body>" + translatedString + "</p></body> </html>");
 
 #if 0
@@ -186,9 +196,71 @@ bool AboutDialog::eventFilter(QObject *obj, QEvent *event)
     return QVLCDialog::eventFilter( obj, event);
 }
 
+void AboutDialog::applyTheme()
+{
+    const QPalette pal = QApplication::palette();
+    const QColor window = pal.color( QPalette::Active, QPalette::Window );
+    const QColor text   = pal.color( QPalette::Active, QPalette::Text );
+    const QColor link   = pal.color( QPalette::Active, QPalette::Link );
+    const QColor mid    = pal.color( QPalette::Active, QPalette::Mid );
+
+    /* Replaces the white/grey scrollbar styling from about.ui. Using palette
+     * roles (rather than literals) means this follows whichever theme is
+     * active, including a switch made while the dialog already exists. */
+    setStyleSheet( QStringLiteral(
+        "QScrollBar:vertical { border: 1px solid %1; background: %2; width: 12px; "
+        "margin: 5px 0 5px 2; }"
+        "QScrollBar::handle:vertical { background: %3; min-height: 12px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { "
+        "border: none; background: none; height: 0px; }"
+        "QScrollBar::add-line:vertical { subcontrol-position: bottom; "
+        "subcontrol-origin: margin; }"
+        "QScrollBar::sub-line:vertical { subcontrol-position: top; "
+        "subcontrol-origin: margin; }"
+        "QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { "
+        "border: none; width: 0px; height: 0px; background: none; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { "
+        "background: none; }" )
+        .arg( mid.name(), window.name(), mid.lighter( 160 ).name() ) );
+
+    /* The rich-text labels do not inherit a stylesheet colour, so give the
+     * header/footer blocks explicit dark-aware backgrounds and text colours. */
+    const bool dark = window.lightness() < 128;
+    ui.horizontalFrame->setStyleSheet(
+            QStringLiteral( "background-color: %1;" )
+                .arg( dark ? window.darker( 130 ).name() : QStringLiteral( "rgb(230, 230, 230)" ) ) );
+    ui.footer->setStyleSheet(
+            QStringLiteral( "background-color: %1; color: %2;" )
+                .arg( dark ? window.darker( 110 ).name() : QStringLiteral( "rgb(245, 245, 245)" ),
+                     dark ? text.name() : QStringLiteral( "black" ) ) );
+
+    const QString linkColor = dark ? link.name() : QStringLiteral( "#0057ae" );
+    ui.licenseButton->setText(
+            QStringLiteral( "<html><head/><body><p><span style=\" text-decoration: underline; color:%1;\">%2</span></p></body></html>" )
+                .arg( linkColor, qtr( "License" ) ) );
+    ui.authorsButton->setText(
+            QStringLiteral( "<html><head/><body><p><span style=\" text-decoration: underline; color:%1;\">%2</span></p></body></html>" )
+                .arg( linkColor, qtr( "Authors" ) ) );
+    ui.creditsButton->setText(
+            QStringLiteral( "<html><head/><body><p><span style=\" text-decoration: underline; color:%1;\">%2</span></p></body></html>" )
+                .arg( linkColor, qtr( "Credits" ) ) );
+
+    /* The blurb carries hardcoded #0057ae link colours; drop them in dark mode
+     * so the anchor text picks up the palette link colour instead. */
+    if( !b_blurbsInitialised )
+    {
+        ui.MainBlabla->setText( "<html><head/><body>" + blurbText + "</p></body> </html>" );
+        b_blurbsInitialised = true;
+    }
+}
+
 void AboutDialog::showEvent( QShowEvent *event )
 {
     ui.stackedWidget->setCurrentWidget( ui.blablaPage );
+    /* This dialog is a singleton built once, but the palette can change while
+     * it exists. Re-derive every colour on each show so the About box always
+     * matches the currently active theme. */
+    applyTheme();
     QVLCDialog::showEvent( event );
 }
 

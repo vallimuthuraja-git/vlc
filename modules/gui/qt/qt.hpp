@@ -75,6 +75,16 @@ enum{
 
 bool isDarkPaletteEnabled(intf_thread_t *);
 void applyDarkPalette();
+/* Restore the palette that was active before the dark palette was applied. */
+bool hasClassicPalette();
+void applyClassicPalette();
+/* Resolve the configured theme (System/Dark/Light) and apply it. Pass NULL
+ * when only the cached preference should be used. */
+void applyCurrentColorScheme(intf_thread_t *);
+/* Store the user's choice without re-reading the config. */
+void setColorSchemePreference( int64_t );
+/* Re-apply when the desktop theme changed; no-op unless the theme is "System". */
+void onSystemColorSchemeChanged();
 
 struct intf_sys_t
 {

@@ -121,6 +121,7 @@ private slots:
     void updateAudioOptions( int );
     void updateAudioVolume( int );
     void langChanged( int );
+    bool applyColorSchemeFromUi( int index );
 #ifdef _WIN32
     void assoDialog();
     void updateCheckBoxes( QTreeWidgetItem*, int );

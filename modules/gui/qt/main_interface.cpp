@@ -578,10 +578,22 @@ inline void MainInterface::createStatusBar()
     speedLabel->setFrameStyle( QFrame::Sunken | QFrame::Panel );
     nameLabel->setFrameStyle( QFrame::Sunken | QFrame::StyledPanel);
     auto updateStyle = [=]() {
-        timeLabel->setStyleSheet(
-            "QLabel:hover { color: black; background-color: rgba(255, 255, 255, 50%) }" );
-        speedLabel->setStyleSheet(
-            "QLabel:hover { color: black; background-color: rgba(255, 255, 255, 50%) }" );
+        /* The hover tint has to be derived from the palette: a hardcoded
+         * white overlay plus black text produced a glaring light flash on the
+         * dark theme. Keep the same translucent-white-on-dark-text treatment in
+         * both themes, scaling the alpha so it reads as a subtle lift. */
+        const QPalette pal = qApp->palette();
+        const QColor bg = pal.color( QPalette::Active, QPalette::Window );
+        const QColor fg = pal.color( QPalette::Active, QPalette::WindowText );
+        const bool isDark = bg.lightness() < 128;
+        /* On a dark background a white overlay lightens; on a light one a
+         * black overlay darkens. Either way the text keeps its own colour. */
+        const QColor overlay = isDark ? QColor(255, 255, 255, 38)
+                                      : QColor(0, 0, 0, 24);
+        const QString hover = QStringLiteral( "QLabel:hover { color: %1; background-color: %2; }" )
+                .arg( fg.name(), overlay.name( QColor::HexArgb ) );
+        timeLabel->setStyleSheet( hover );
+        speedLabel->setStyleSheet( hover );
         /* pad both label and its tooltip */
         nameLabel->setStyleSheet( "padding-left: 5px; padding-right: 5px;" );
 

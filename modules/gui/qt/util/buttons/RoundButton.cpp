@@ -22,6 +22,7 @@
 #include "RoundButton.hpp"
 
 #include <QPainter>
+#include <QPalette>
 #include <QStyleOptionToolButton>
 
 RoundButton::RoundButton( QWidget* parent )
@@ -39,16 +40,23 @@ QSize RoundButton::sizeHint() const
 QBrush RoundButton::pen( QStyleOptionToolButton* option ) const
 {
     const bool over = option->state & QStyle::State_MouseOver;
-    return QBrush( over ? QColor( 61, 165, 225 ) : QColor( 109, 106, 102 ) );
+    const QPalette pal = palette();
+    /* Derived from the palette so the outline stays visible on both the
+     * classic light and the dark theme. */
+    return QBrush( over ? pal.color( QPalette::Highlight )
+                        : pal.color( QPalette::Mid ) );
 }
 
 QBrush RoundButton::brush( QStyleOptionToolButton* option ) const
 {
     const bool over = option->state & QStyle::State_MouseOver;
     const bool pressed = option->state & QStyle::State_Sunken;
-    QColor g1 = QColor( 219, 217, 215 );
-    QColor g2 = QColor( 205, 202, 199 );
-    QColor g3 = QColor( 187, 183, 180 );
+    /* Build the gradient from the current button colour instead of hardcoded
+     * greys, so the button matches whichever palette is active. */
+    const QColor base = palette().color( QPalette::Button );
+    QColor g1 = base.lighter( 115 );
+    QColor g2 = base;
+    QColor g3 = base.darker( 115 );
 
     if ( pressed ) {
         g1 = g1.darker( 120 );
