@@ -115,13 +115,17 @@ private:
 #endif
 
 /* Display only the options for the selected audio output */
+    /* Write the selected colour scheme to the config and apply it immediately.
+     * Not a slot: it returns whether a custom palette is in use, which decides
+     * whether the widget style has to be Fusion for those colours to show. */
+    bool applyColorSchemeFromUi( int index );
+
 private slots:
     void lastfm_Changed( int );
     void updateVideoOptions( int );
     void updateAudioOptions( int );
     void updateAudioVolume( int );
     void langChanged( int );
-    bool applyColorSchemeFromUi( int index );
 #ifdef _WIN32
     void assoDialog();
     void updateCheckBoxes( QTreeWidgetItem*, int );

@@ -415,6 +415,27 @@ static bool HasX11( vlc_object_t *obj )
 static QPalette classicPalette;
 static bool classicPaletteSaved = false;
 
+/* The palette the platform theme handed us at startup, sampled once before
+ * anything calls QApplication::setStyle(). That call replaces the application
+ * palette with the chosen style's defaults, and Fusion's defaults are always
+ * light, so asking the live style later can no longer tell a light desktop
+ * from a dark one. */
+static QPalette platformPalette;
+static bool platformPaletteSaved = false;
+
+/* Must be called right after the QApplication is built and before any
+ * QApplication::setStyle(). */
+static void savePlatformPalette()
+{
+    if (platformPaletteSaved)
+        return;
+    const QStyle *style = QApplication::style();
+    if (style == NULL)
+        return;
+    platformPalette = style->standardPalette();
+    platformPaletteSaved = true;
+}
+
 /* Returns true when the desktop is currently asking applications to use a dark
  * appearance. Covers the three ways that can be known:
  *   - Qt 6.5+ exposes it directly through QStyleHints::colorScheme().
@@ -424,13 +445,16 @@ static bool classicPaletteSaved = false;
  * Returns false when the desktop gives us no usable answer. */
 static bool systemPrefersDark()
 {
-    /* Qt 6.5+ exposes the desktop scheme directly; older Qt still compiles but
-     * the deprecated Unknown value simply falls through to the heuristics. */
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    /* Qt 6.5+ exposes the desktop scheme directly, and is also the only
+     * version that tells us when it changes. Qt::ColorScheme does not exist
+     * before 6.5, so the whole block has to be version-guarded. */
     const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
     if (scheme == Qt::ColorScheme::Dark)
         return true;
     if (scheme == Qt::ColorScheme::Light)
         return false;
+#endif
 
 #ifdef Q_OS_WIN
     /* Missing key (or an unreadable one) means "not specified", and the
@@ -448,10 +472,15 @@ static bool systemPrefersDark()
         return false;
     return value == 0; /* 0 == apps should use the dark theme */
 #else
-    /* The platform palette is the only cross-desktop signal. Compare the
-     * window colour's lightness rather than any single channel, so a tinted
-     * dark theme is still recognised as dark. */
-    const QPalette platformPalette = QApplication::style()->standardPalette();
+    /* Qt older than 6.5 has no scheme query and no change notification, so the
+     * platform palette captured at startup is the only signal available.
+     * Compare the window colour's lightness rather than any single channel, so
+     * a tinted dark theme is still recognised as dark. Reading the live style
+     * here instead would be wrong: by now Fusion may have been forced, and its
+     * standard palette is always light, which would make a light -> dark
+     * desktop switch undetectable for the rest of the session. */
+    if (!platformPaletteSaved)
+        return false;
     return platformPalette.color(QPalette::Active, QPalette::Window).lightness() < 128;
 #endif
 }
@@ -557,7 +586,10 @@ void applyDarkPalette()
     setAll(QPalette::HighlightedText, highlightText, dimText,    disabledText);
     setAll(QPalette::Link,            linkColor,   linkColor,   disabledText);
     setAll(QPalette::LinkVisited,     linkVisited, linkVisited, disabledText);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 12, 0)
+    /* QPalette::PlaceholderText only exists from Qt 5.12 on. */
     setAll(QPalette::PlaceholderText, dimText,     dimText,     disabledText);
+#endif
 
     /* Tooltips are shown on a lighter surface than the window so they read as
      * floating rather than as holes cut into the interface. */
@@ -580,11 +612,6 @@ void applyDarkPalette()
 
     /* Apply the dark palette globally */
     QApplication::setPalette(darkPalette);
-}
-
-bool hasClassicPalette()
-{
-    return classicPaletteSaved;
 }
 
 void applyClassicPalette()
@@ -761,11 +788,17 @@ static void *ThreadPlatform( void *obj, char *platform_name )
 
     /* The colour theme is applied further down, once the widget style is known:
      * QApplication::setStyle() resets the application palette, so applying it
-     * here would be undone. The system-theme watcher is connected here because
-     * it only needs the application object. */
-    /* Follow the desktop for as long as the user chose "System". */
+     * here would be undone. */
+    /* Sample the platform palette before any setStyle() call replaces it - the
+     * non-Windows theme fallback reads it later to spot a dark desktop. */
+    savePlatformPalette();
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    /* Follow the desktop for as long as the user chose "System". The signal
+     * only exists from Qt 6.5 on; older Qt resolves the theme at startup. */
     QObject::connect( app.styleHints(), &QStyleHints::colorSchemeChanged,
                       &app, []() { onSystemColorSchemeChanged(); } );
+#endif
 
     p_sys->p_app = &app;
 

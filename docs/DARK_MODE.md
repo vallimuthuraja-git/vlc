@@ -11,18 +11,50 @@ and how an AI agent should perform and verify a change.
 
 ## 1. Concepts
 
-VLC's Qt interface has **two mutually exclusive themes**:
+VLC's Qt interface has **three** mutually exclusive colour themes:
 
 | Theme | Config option | State |
 |---|---|---|
-| **Classic** (light) | `qt-dark-palette = 0` | Qt default style palette |
+| **System** (default) | `qt-dark-palette = 0` | Follows the desktop preference |
 | **Dark** | `qt-dark-palette = 1` | VLC's custom dark `QPalette` |
+| **Light** | `qt-dark-palette = 2` | The classic palette, restored as it was |
 
-Switching is **seamless** — it happens live when the checkbox in
-*Preferences → Interface* is toggled. No restart is required.
+The option was a boolean (`Use a dark palette`) before this change. It kept its
+name and its `0` / `1` values, so existing configurations keep working: `1`
+still means Dark, and the old default `0` now means "System" instead of "Light".
+The consequence is that anyone who never touched the setting now follows the
+desktop rather than always getting the light theme.
 
-> Both themes are always available. Turning dark mode off restores the exact
-> palette that was active before, not a freshly guessed one (see §3.3).
+Switching is **seamless** — it happens live when the selection in
+*Preferences → Interface* changes. No restart is required.
+
+> All three themes are always available. Turning dark mode off restores the
+> exact palette that was active before, not a freshly guessed one (see §3.3).
+
+### 1.1 How "System" is detected
+
+`systemPrefersDark()` in `qt.cpp` tries three sources, in order:
+
+1. **Qt 6.5+** — `QStyleHints::colorScheme()`. This is the only source that
+   also *notifies* on change, via the `colorSchemeChanged` signal wired up in
+   `ThreadPlatform()`, so on Qt 6.5+ the theme follows the desktop live.
+2. **Windows** — the `AppsUseLightTheme` value under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`.
+   `0` means apps should be dark. A missing or non-`REG_DWORD` value is treated
+   as light, matching the documented Windows default.
+3. **Everything else** — the platform style's window colour, cached at startup
+   by `savePlatformPalette()` and compared against mid grey.
+
+Two consequences worth knowing:
+
+- On **Qt older than 6.5** there is no scheme query and no change signal, so
+  source 1 is compiled out entirely and the theme is decided once at startup.
+  Sources 2 and 3 still work.
+- The cache in `savePlatformPalette()` is **not** optional. The Qt interface
+  forces `Fusion` when a custom palette is in use, and `Fusion`'s standard
+  palette is always light — reading `QApplication::style()` after that point
+  would report "light" forever and a light → dark desktop switch could never be
+  detected.
 
 ---
 
@@ -46,7 +78,7 @@ static const QColor lightColor  (95, 95, 95);    /* #5F5F5F 3D borders    */
 static const QColor darkColor   (15, 15, 15);    /* #0F0F0F shadows       */
 static const QColor textColor   (255, 255, 255);
 static const QColor dimText     (150, 150, 150); /* unfocused / secondary */
-static const QColor disabledText(90, 90, 90);
+static const QColor disabledText(120, 120, 120);
 static const QColor disabledBg  (20, 20, 20);
 ...
 QColor accentColor (255, 136, 0);                /* VLC brand orange      */
